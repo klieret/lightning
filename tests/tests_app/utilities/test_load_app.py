@@ -58,6 +58,7 @@ def test_extract_metadata_from_component():
                 "mounts": None,
                 "_internal_id": "default",
                 "interruptible": False,
+                "colocation_group_id": None,
             },
         },
         {
@@ -82,6 +83,7 @@ def test_extract_metadata_from_component():
                 "mounts": None,
                 "_internal_id": "default",
                 "interruptible": False,
+                "colocation_group_id": None,
             },
         },
         {"affiliation": ["root", "flow_b"], "cls_name": "FlowB", "module": "__main__", "docstring": "FlowB."},
@@ -101,6 +103,7 @@ def test_extract_metadata_from_component():
                 "mounts": None,
                 "_internal_id": ANY,
                 "interruptible": False,
+                "colocation_group_id": None,
             },
         },
     ]

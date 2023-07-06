@@ -16,7 +16,7 @@ import os
 from contextlib import contextmanager, nullcontext
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Dict, Generator, List, Mapping, Optional, Sequence, Tuple, Union, cast, overload
+from typing import Any, Callable, cast, Dict, Generator, List, Mapping, Optional, overload, Sequence, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -27,13 +27,22 @@ from torch import Tensor
 from torch.optim import Optimizer
 from torch.utils.data import BatchSampler, DataLoader, DistributedSampler, RandomSampler, SequentialSampler
 
-from lightning.fabric.accelerators.accelerator import Accelerator
-from lightning.fabric.connector import _PLUGIN_INPUT, _PRECISION_INPUT, _Connector, _is_using_cli
 from lightning.fabric.loggers import Logger
+from lightning.fabric.utilities.imports import _TORCH_GREATER_EQUAL_2_0
+
 from lightning.fabric.plugins import Precision  # avoid circular imports: # isort: split
-from lightning.fabric.strategies import DeepSpeedStrategy, FSDPStrategy, SingleDeviceStrategy, Strategy, XLAStrategy
+from lightning.fabric.accelerators.accelerator import Accelerator
+from lightning.fabric.connector import _Connector, _is_using_cli, _PLUGIN_INPUT, _PRECISION_INPUT
+from lightning.fabric.strategies import (
+    DataParallelStrategy,
+    DeepSpeedStrategy,
+    FSDPStrategy,
+    SingleDeviceStrategy,
+    Strategy,
+    XLAStrategy,
+)
 from lightning.fabric.strategies.launchers import _MultiProcessingLauncher, _XLALauncher
-from lightning.fabric.strategies.strategy import TBroadcast, _Sharded
+from lightning.fabric.strategies.strategy import _Sharded, TBroadcast
 from lightning.fabric.utilities import move_data_to_device
 from lightning.fabric.utilities.apply_func import convert_tensors_to_scalars, convert_to_tensors
 from lightning.fabric.utilities.data import (
@@ -43,7 +52,6 @@ from lightning.fabric.utilities.data import (
     has_iterable_dataset,
 )
 from lightning.fabric.utilities.distributed import DistributedSamplerWrapper
-from lightning.fabric.utilities.imports import _TORCH_GREATER_EQUAL_2_0
 from lightning.fabric.utilities.registry import _load_external_callbacks
 from lightning.fabric.utilities.seed import seed_everything
 from lightning.fabric.utilities.types import ReduceOp
@@ -229,6 +237,8 @@ class Fabric:
         if hasattr(original_module, "_fabric"):  # this is probably a LightningModule
             original_module._fabric = self  # type: ignore[assignment]
             original_module._fabric_optimizers = optimizers  # type: ignore[assignment]
+            if original_module not in self._callbacks:
+                self._callbacks.append(original_module)
 
         self.call("on_after_setup", fabric=self, module=module)
 
@@ -270,6 +280,8 @@ class Fabric:
 
         if hasattr(original_module, "_fabric"):  # this is probably a LightningModule
             original_module._fabric = self  # type: ignore[assignment]
+            if original_module not in self._callbacks:
+                self._callbacks.append(original_module)
 
         self._models_setup += 1
         return module
@@ -502,7 +514,8 @@ class Fabric:
     ) -> Union[Tensor, Dict, List, Tuple]:
         """Gather tensors or collections of tensors from multiple processes.
 
-        This method needs to be called on all processes. Failing to do so will cause your program to stall forever.
+        This method needs to be called on all processes and the tensors need to have the same shape across all
+        processes, otherwise your program will stall forever.
 
         Args:
             data: int, float, tensor of shape (batch, ...), or a (possibly nested) collection thereof.
@@ -526,7 +539,8 @@ class Fabric:
     ) -> Union[Tensor, Dict, List, Tuple]:
         """Reduce tensors or collections of tensors from multiple processes.
 
-        This method needs to be called on all processes. Failing to do so will cause your program to stall forever.
+        This method needs to be called on all processes and the tensors need to have the same shape across all
+        processes, otherwise your program will stall forever.
 
         Args:
             data: int, float, tensor of shape (batch, ...), or a (possibly nested) collection thereof.
@@ -618,7 +632,10 @@ class Fabric:
         .. deprecated:: This context manager is deprecated in favor of :meth:`init_module`, use it instead.
         """
         rank_zero_deprecation("`Fabric.sharded_model()` is deprecated in favor of `Fabric.init_module()`.")
-        with _old_sharded_model_context(self._strategy):
+        if isinstance(self.strategy, _Sharded):
+            with self.strategy.module_sharded_context():
+                yield
+        else:
             yield
 
     @contextmanager
@@ -661,7 +678,12 @@ class Fabric:
         with self._strategy.module_init_context(empty_init=empty_init):
             yield
 
-    def save(self, path: Union[str, Path], state: Dict[str, Union[nn.Module, Optimizer, Any]]) -> None:
+    def save(
+        self,
+        path: Union[str, Path],
+        state: Dict[str, Union[nn.Module, Optimizer, Any]],
+        filter: Optional[Dict[str, Callable[[str, Any], bool]]] = None,
+    ) -> None:
         """Save checkpoint contents to a file.
 
         How and which processes save gets determined by the `strategy`. For example, the `ddp` strategy
@@ -672,8 +694,21 @@ class Fabric:
             path: A path to where the file(s) should be saved
             state: A dictionary with contents to be saved. If the dict contains modules or optimizers, their
                 state-dict will be retrieved and converted automatically.
+            filter: An optional dictionary containing filter callables that return a boolean indicating whether the
+                given item should be saved (``True``) or filtered out (``False``). Each filter key should match a
+                state key, where its filter will be applied to the ``state_dict`` generated.
         """
-        self._strategy.save_checkpoint(path=path, state=_unwrap_objects(state))
+        if filter is not None:
+            if not isinstance(filter, dict):
+                raise TypeError(f"Filter should be a dictionary, given {filter!r}")
+            if not set(filter).issubset(state):
+                raise ValueError(
+                    f"The filter keys {filter.keys() - state} are not present in the state keys {set(state)}."
+                )
+            for k, v in filter.items():
+                if not callable(v):
+                    raise TypeError(f"Expected `fabric.save(filter=...)` for key {k!r} to be a callable, given {v!r}")
+        self._strategy.save_checkpoint(path=path, state=_unwrap_objects(state), filter=filter)
         self.barrier()
 
     def load(
@@ -836,11 +871,7 @@ class Fabric:
 
     def _wrap_with_setup(self, to_run: Callable, *args: Any, **kwargs: Any) -> Any:
         self._strategy.setup_environment()
-        # TODO: remove sharded_context from here as users are meant to enable it manually
-        # apply sharded context to prevent OOM
-        with _old_sharded_model_context(self._strategy), _replace_dunder_methods(
-            DataLoader, "dataset"
-        ), _replace_dunder_methods(BatchSampler):
+        with _replace_dunder_methods(DataLoader, "dataset"), _replace_dunder_methods(BatchSampler):
             return to_run(*args, **kwargs)
 
     def _move_model_to_device(self, model: nn.Module, optimizers: List[Optimizer]) -> nn.Module:
@@ -895,7 +926,7 @@ class Fabric:
         setattr(self, "run", partial(self._wrap_and_launch, self.run))
 
     def _validate_launched(self) -> None:
-        if not self._launched and not isinstance(self._strategy, SingleDeviceStrategy):
+        if not self._launched and not isinstance(self._strategy, (SingleDeviceStrategy, DataParallelStrategy)):
             raise RuntimeError(
                 "To use Fabric with more than one device, you must call `.launch()` or use the CLI:"
                 " `lightning run model --help`."
@@ -952,12 +983,3 @@ class Fabric:
         callbacks = callbacks if isinstance(callbacks, list) else [callbacks]
         callbacks.extend(_load_external_callbacks("lightning.fabric.callbacks_factory"))
         return callbacks
-
-
-@contextmanager
-def _old_sharded_model_context(strategy: Strategy) -> Generator:
-    if isinstance(strategy, _Sharded):
-        with strategy.module_sharded_context():
-            yield
-    else:
-        yield

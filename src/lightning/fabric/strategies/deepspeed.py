@@ -19,7 +19,7 @@ import platform
 from contextlib import contextmanager, nullcontext
 from itertools import chain
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, Generator, List, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Generator, List, Mapping, Optional, Tuple, TYPE_CHECKING, Union
 
 import torch
 from lightning_utilities.core.imports import RequirementCache
@@ -380,7 +380,11 @@ class DeepSpeedStrategy(DDPStrategy, _Sharded):
             yield
 
     def save_checkpoint(
-        self, path: _PATH, state: Dict[str, Union[Module, Optimizer, Any]], storage_options: Optional[Any] = None
+        self,
+        path: _PATH,
+        state: Dict[str, Union[Module, Optimizer, Any]],
+        storage_options: Optional[Any] = None,
+        filter: Optional[Dict[str, Callable[[str, Any], bool]]] = None,
     ) -> None:
         """Save model, optimizer, and other state in a checkpoint directory.
 
@@ -389,6 +393,7 @@ class DeepSpeedStrategy(DDPStrategy, _Sharded):
             state: A dictionary with contents to be saved. If the dict contains modules or optimizers, their
                 state-dict will be retrieved and converted automatically.
             storage_options: Unused by this strategy, since it doesn't use a ``CheckpointIO`` plugin.
+            filter: Unsupported.
 
         Raises:
             TypeError:
@@ -401,6 +406,11 @@ class DeepSpeedStrategy(DDPStrategy, _Sharded):
             raise TypeError(
                 "`DeepSpeedStrategy.save_checkpoint(..., storage_options=...)` is not supported because"
                 " `DeepSpeedStrategy` does not use the `CheckpointIO`."
+            )
+        if filter is not None:
+            raise TypeError(
+                "`DeepSpeedStrategy.save_checkpoint(..., filter=...)` is not supported because"
+                " `DeepSpeedStrategy` manages the state serialization internally."
             )
 
         engines = _get_deepspeed_engines_from_state(state)
@@ -428,7 +438,7 @@ class DeepSpeedStrategy(DDPStrategy, _Sharded):
         state = {k: v for k, v in state.items() if v not in excluded_objects}
         _validate_state_keys(state)
         # there might be other stateful objects unrelated to the deepspeed engine - convert them to a state_dict
-        state = self._convert_stateful_objects_in_state(state)
+        state = self._convert_stateful_objects_in_state(state, filter={})
         # use deepspeed's internal checkpointing function to handle partitioned weights across processes
         engine.save_checkpoint(path, client_state=state, tag="checkpoint")
 
@@ -588,6 +598,8 @@ class DeepSpeedStrategy(DDPStrategy, _Sharded):
                 f"The DeepSpeed strategy is only supported on CUDA GPUs but `{self.accelerator.__class__.__name__}`"
                 " is used."
             )
+        assert self.parallel_devices is not None
+        _validate_device_index_selection(self.parallel_devices)
         reset_seed()
         self._set_world_ranks()
         self._init_deepspeed_distributed()
@@ -820,4 +832,15 @@ def _validate_state_keys(state: Dict[str, Any]) -> None:
             "Your state has keys that collide with DeepSpeed's internal engine state. This could result in your"
             " values being overwritten by DeepSpeed. Consider changing the name of these keys to something else: "
             + ", ".join(colliding_keys)
+        )
+
+
+def _validate_device_index_selection(parallel_devices: List[torch.device]) -> None:
+    selected_device_indices = [device.index for device in parallel_devices]
+    expected_device_indices = list(range(len(parallel_devices)))
+    if selected_device_indices != expected_device_indices:
+        raise RuntimeError(
+            f"The selected device indices {selected_device_indices!r} don't match the local rank values of processes."
+            " If you need to select GPUs at a specific index, set the `CUDA_VISIBLE_DEVICES` environment variable"
+            f" instead. For example: `CUDA_VISIBLE_DEVICES={','.join(str(i) for i in selected_device_indices)}`."
         )

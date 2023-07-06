@@ -55,6 +55,7 @@ def test_dict():
                 "shm_size": 0,
                 "_internal_id": "default",
                 "interruptible": False,
+                "colocation_group_id": None,
             },
         }
         for k in ("a", "b", "c", "d")
@@ -90,6 +91,7 @@ def test_dict():
                 "shm_size": 0,
                 "_internal_id": "default",
                 "interruptible": False,
+                "colocation_group_id": None,
             },
         }
         for k in ("a", "b", "c", "d")
@@ -125,6 +127,7 @@ def test_dict():
                 "shm_size": 0,
                 "_internal_id": "default",
                 "interruptible": False,
+                "colocation_group_id": None,
             },
         }
         for k in ("a", "b", "c", "d")
@@ -212,6 +215,7 @@ def test_list():
                 "shm_size": 0,
                 "_internal_id": "default",
                 "interruptible": False,
+                "colocation_group_id": None,
             },
         }
         for i in range(4)
@@ -247,6 +251,7 @@ def test_list():
                 "shm_size": 0,
                 "_internal_id": "default",
                 "interruptible": False,
+                "colocation_group_id": None,
             },
         }
         for i in range(4)
@@ -277,6 +282,7 @@ def test_list():
                 "shm_size": 0,
                 "_internal_id": "default",
                 "interruptible": False,
+                "colocation_group_id": None,
             },
         }
         for i in range(4)
