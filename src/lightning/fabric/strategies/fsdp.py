@@ -222,24 +222,27 @@ class FSDPStrategy(ParallelStrategy, _Sharded):
         :class:`~torch.distributed.fsdp.fully_sharded_data_parallel.FullyShardedDataParallel` module."""
         from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel
 
-        if "auto_wrap_policy" in self._fsdp_kwargs and any(
-            isinstance(mod, FullyShardedDataParallel) for mod in module.modules()
-        ):
-            # If model is already wrapped, we need to avoid sending the `auto_wrap_policy`
-            del self._fsdp_kwargs["auto_wrap_policy"]
-        wrapped_module = FullyShardedDataParallel(
-            module=module,
-            cpu_offload=self.cpu_offload,
-            mixed_precision=self.mixed_precision_config,
-            device_id=self.root_device.index,
-            **self._fsdp_kwargs,
-        )
+        if any(isinstance(mod, FullyShardedDataParallel) for mod in module.modules()):
+            # the user wrapped at least one layer in `configure_sharded_model` already
+            if "auto_wrap_policy" in self._fsdp_kwargs:
+                rank_zero_warn(
+                    "A FSDP `auto_wrap_policy` is set, but the model is already wrapped. The policy will be ignored."
+                )
+                del self._fsdp_kwargs["auto_wrap_policy"]
+        else:
+            module = FullyShardedDataParallel(
+                module=module,
+                cpu_offload=self.cpu_offload,
+                mixed_precision=self.mixed_precision_config,
+                device_id=self.root_device.index,
+                **self._fsdp_kwargs,
+            )
 
         # activation checkpointing needs to be set up after wrapping the model
         if _TORCH_GREATER_EQUAL_1_13 and self._activation_checkpointing:
-            _setup_activation_checkpointing(module=wrapped_module, layers=self._activation_checkpointing)
+            _setup_activation_checkpointing(module=module, layers=self._activation_checkpointing)
 
-        return wrapped_module
+        return module
 
     def setup_optimizer(self, optimizer: Optimizer) -> Optimizer:
         """Set up an optimizer for a model wrapped with FSDP.
@@ -594,12 +597,22 @@ class FSDPStrategy(ParallelStrategy, _Sharded):
         rank_zero_only.rank = self.global_rank
 
 
-def _setup_activation_checkpointing(module: "FullyShardedDataParallel", layers: List[Type[Module]]) -> None:
+def _setup_activation_checkpointing(module: Module, layers: List[Type[Module]]) -> None:
     from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
         apply_activation_checkpointing,
         checkpoint_wrapper,
         CheckpointImpl,
+        CheckpointWrapper,
     )
+
+    if any(isinstance(mod, CheckpointWrapper) for mod in module.modules()):
+        if layers:
+            rank_zero_warn(
+                f"FSDP checkpointing for the layers {layers} is configured, but the model already contains checkpointed"
+                " layers. Checkpointing will be ignored."
+            )
+        # the module is already wrapped with activation checkpointing, avoid wrapping twice
+        return
 
     check_fn = lambda submodule: isinstance(submodule, tuple(layers))
     wrapper = functools.partial(

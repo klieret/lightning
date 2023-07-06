@@ -271,12 +271,17 @@ class ModelHooks:
         """
 
     def configure_sharded_model(self) -> None:
-        """Hook to create modules in a distributed aware context. This is useful for when using sharded plugins,
-        where we'd like to shard the model instantly, which is useful for extremely large models which can save
-        memory and initialization time.
+        """Hook to create modules in a strategy and precision aware context. This is particularly useful for when
+        using sharded plugins, where we'd like to shard the model instantly to save memory and initialization time.
+        This is recommended also for non-sharded models.
 
         This hook is called during each of fit/val/test/predict stages in the same process, so ensure that
         implementation of this hook is idempotent.
+
+        .. note ::
+
+            This uses the :meth:`~lightning.pytorch.trainer.trainer.Trainer.init_module` context manager. So you don't
+            need to use this hook if you already instantiated your module under it.
         """
 
 
