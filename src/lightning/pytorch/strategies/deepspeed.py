@@ -31,8 +31,6 @@ import lightning.pytorch as pl
 from lightning.fabric.plugins import ClusterEnvironment
 from lightning.fabric.strategies import _StrategyRegistry
 from lightning.fabric.strategies.deepspeed import _DEEPSPEED_AVAILABLE, _validate_device_index_selection
-from lightning.fabric.utilities.imports import _TORCH_GREATER_EQUAL_1_13
-from lightning.fabric.utilities.init import _EmptyInit
 from lightning.fabric.utilities.optimizer import _optimizers_to_device
 from lightning.fabric.utilities.seed import reset_seed
 from lightning.fabric.utilities.types import _PATH, LRScheduler, ReduceLROnPlateau
@@ -506,11 +504,8 @@ class DeepSpeedStrategy(DDPStrategy):
             raise NotImplementedError(
                 f"`{empty_init=}` is not a valid choice with `DeepSpeedStrategy` when ZeRO stage 3 is enabled."
             )
-        empty_init = empty_init and not self.zero_stage_3
-        empty_init_context = (
-            _EmptyInit(enabled=empty_init) if _TORCH_GREATER_EQUAL_1_13 and not self.zero_stage_3 else nullcontext()
-        )
-        with empty_init_context, self.tensor_init_context(), self.model_sharded_context():
+        base_context = super().module_init_context(empty_init=empty_init) if not self.zero_stage_3 else nullcontext()
+        with base_context, self.model_sharded_context():
             yield
 
     @contextmanager

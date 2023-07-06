@@ -217,7 +217,7 @@ class FSDPStrategy(ParallelStrategy, _Sharded):
         module = self.setup_module(module)
         return module, optimizers
 
-    def setup_module(self, module: Module) -> "FullyShardedDataParallel":
+    def setup_module(self, module: Module) -> Module:
         """Wraps the model into a
         :class:`~torch.distributed.fsdp.fully_sharded_data_parallel.FullyShardedDataParallel` module."""
         from torch.distributed.fsdp.fully_sharded_data_parallel import FullyShardedDataParallel
